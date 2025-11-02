@@ -8,9 +8,22 @@ version = "0.3.0"
 description = "Milvus admin & RAG UI with S3-compatible data staging utilities"
 requires-python = ">=3.11,<3.12"
 readme = "README.md"
-authors = [{ name = "milvus-admin-ui", email = "team@example.com" }]
 license = { text = "Apache-2.0" }
+authors = [
+  { name = "Ruslan Magana Vsevolodovna", email = "contact@ruslanmv.com" }
+]
 keywords = ["ibm-cos", "s3", "milvus", "vector", "rag", "admin-ui"]
+
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Database",
+  "Topic :: Internet :: WWW/HTTP :: WSGI :: Application"
+]
 
 dependencies = [
   "ibm-cos-sdk>=2.13.0",
@@ -24,12 +37,39 @@ dependencies = [
   "uvicorn>=0.29",
   "pydantic>=2,<3",
 
-  # ✅ Required for FastAPI form-data / file uploads (/api/ingest/upload)
+  # ✅ For FastAPI form-data / file uploads
   "python-multipart>=0.0.9",
 
-  # ✅ Recommended for efficient static file and upload streaming
-  "aiofiles>=23.2.1"
+  # ✅ Efficient static file and upload streaming
+  "aiofiles>=23.2.1",
+
+  # ✅ For model snapshot downloads during preload
+  "huggingface-hub>=0.24",
+
+  # ✅ Torch pin for stability; skip on Apple Silicon where prebuilt wheels differ
+  "torch>=2.1,<3 ; platform_system!='Darwin' or platform_machine!='arm64'",
 ]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5",
+  "black>=24.3",
+  "mypy>=1.8",
+  "types-requests>=2.31.0.20240218",
+  "types-python-dateutil>=2.8.19.20240311"
+]
+test = [
+  "pytest>=8.1",
+  "pytest-asyncio>=0.23",
+  "httpx>=0.27",
+  "requests>=2.32"
+]
+
+[project.urls]
+Homepage = "https://ruslnamv.com"
+Documentation = "https://ruslnamv.com"
+Source = "https://ruslnamv.com"
+Issues = "https://ruslnamv.com"
 
 [project.scripts]
 mui-ingest = "utils.cli_ingest:main"

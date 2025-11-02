@@ -23,8 +23,9 @@ import {
   Upload,
   Progress,
   message,
+  Spin,
 } from "antd";
-import type { UploadFile } from "antd/es/upload/interface";
+import type { UploadFile, UploadProps } from "antd/es/upload/interface";
 import {
   DatabaseOutlined,
   CheckCircleTwoTone,
@@ -37,7 +38,6 @@ import {
   DownloadOutlined,
   InboxOutlined,
 } from "@ant-design/icons";
-import { useCustomMutation } from "@refinedev/core";
 import { useNavigate } from "react-router-dom";
 
 const { Title, Text, Paragraph } = Typography;
@@ -77,7 +77,6 @@ export default function CreateCollectionWizard({
   standalone,
 }: Props) {
   const navigate = useNavigate();
-  const { mutateAsync, isLoading } = useCustomMutation();
 
   const [current, setCurrent] = useState(0);
 
@@ -88,7 +87,6 @@ export default function CreateCollectionWizard({
 
   const indexType = Form.useWatch("index_type", schemaForm) || "IVF_FLAT";
   const sourceType: SourceType = Form.useWatch("source_type", sourceForm) || "upload";
-  const selectedModelId: string | undefined = Form.useWatch("model", ingestForm);
 
   // Model catalog (from backend)
   const [modelOptions, setModelOptions] = useState<ModelOption[]>(FALLBACK_MODELS);
@@ -105,32 +103,18 @@ export default function CreateCollectionWizard({
             dim: m.dim,
           }));
           setModelOptions(opts);
-          const curModel = ingestForm.getFieldValue("model");
-          if (!curModel) {
+          const cur = ingestForm.getFieldValue("model");
+          if (!cur) {
             ingestForm.setFieldsValue({ model: opts[0].value });
             schemaForm.setFieldsValue({ dim: opts[0].dim });
           }
         }
       } catch {
-        // ignore; use fallback options
+        /* fallback options already set */
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Auto-sync dim when model changes
-  useEffect(() => {
-    if (!selectedModelId) return;
-    const mo = modelOptions.find((m) => m.value === selectedModelId);
-    if (mo) {
-      const curDim = schemaForm.getFieldValue("dim");
-      if (curDim !== mo.dim) {
-        schemaForm.setFieldsValue({ dim: mo.dim });
-        message.info(`Embedding dimension adjusted to ${mo.dim} for selected model.`);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedModelId]);
 
   // Upload state
   const [fileList, setFileList] = useState<UploadFile[]>([]);
@@ -142,6 +126,34 @@ export default function CreateCollectionWizard({
   const [processingJobId, setProcessingJobId] = useState<string | null>(null);
   const [job, setJob] = useState<any>(null);
   const pollRef = useRef<number | null>(null);
+
+  // Success screen
+  const [createdName, setCreatedName] = useState<string>("");
+  const [syncTriggered, setSyncTriggered] = useState(false);
+  const [success, setSuccess] = useState(false);
+
+  // Notifications control
+  const doneNotifiedRef = useRef(false);
+  useEffect(() => {
+    doneNotifiedRef.current = false;
+  }, [processingJobId]);
+
+  // Fake progress for smooth UX (like AddDataWizard)
+  const [fakePct, setFakePct] = useState(0);
+  useEffect(() => {
+    if (!processingJobId) {
+      setFakePct(0);
+      return;
+    }
+    if (job?.status === "done" || job?.status === "error") {
+      setFakePct(100);
+      return;
+    }
+    const t = window.setInterval(() => {
+      setFakePct((p) => (p < 95 ? Math.min(95, p + 2 + Math.random() * 3) : p));
+    }, 500);
+    return () => window.clearInterval(t);
+  }, [processingJobId, job?.status]);
 
   // Poll job progress when we have a job id
   useEffect(() => {
@@ -155,14 +167,20 @@ export default function CreateCollectionWizard({
           if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = null;
           if (j.job.status === "done") {
-            message.success("Ingest completed.");
-            setSuccess(true);
+            if (!doneNotifiedRef.current) {
+              doneNotifiedRef.current = true;
+              message.success("Ingest completed.");
+              setSuccess(true);
+            }
           } else {
-            message.error("Ingest failed. See logs below.");
+            if (!doneNotifiedRef.current) {
+              doneNotifiedRef.current = true;
+              message.error("Ingest failed. See logs below.");
+            }
           }
         }
       } catch {
-        // ignore transient errors
+        /* ignore transient */
       }
     };
     tick();
@@ -171,6 +189,28 @@ export default function CreateCollectionWizard({
       if (pollRef.current) window.clearInterval(pollRef.current);
     };
   }, [processingJobId]);
+
+  // Map backend stage -> tiny stepper for processing
+  const stageToStep = (s?: string) =>
+    s === "upload_saved" ? 1 : s === "ingesting" ? 2 : s === "building_index" ? 3 : s === "done" ? 4 : 0;
+
+  const processingSteps = (
+    <Steps
+      size="small"
+      current={stageToStep(job?.stage)}
+      items={[
+        { title: "Start" },
+        { title: "Saved" },
+        { title: "Ingest" },
+        { title: "Index" },
+        { title: "Done" },
+      ]}
+    />
+  );
+
+  const isJobActive = Boolean(
+    processingJobId && (!job?.status || (job?.status !== "done" && job?.status !== "error")),
+  );
 
   // Defaults
   const initialSchema = useMemo(
@@ -222,49 +262,91 @@ export default function CreateCollectionWizard({
     [],
   );
 
-  const [createdName, setCreatedName] = useState<string>("");
-  const [syncTriggered, setSyncTriggered] = useState(false);
-  const [success, setSuccess] = useState(false);
+  // Seed ALL forms once so values persist even when steps unmount
+  useEffect(() => {
+    schemaForm.setFieldsValue(initialSchema);
+    sourceForm.setFieldsValue(initialSource);
+    ingestForm.setFieldsValue(initialIngest);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const handleNext = async () => {
-    if (current === 0) {
-      await schemaForm.validateFields();
-    } else if (current === 1) {
-      await sourceForm.validateFields();
-      if (sourceType === "upload" && fileList.length === 0) {
-        throw new Error("Please add at least one file (or a folder) to upload.");
-      }
-    } else if (current === 2) {
-      await ingestForm.validateFields();
-    }
-    setCurrent((c) => c + 1);
+  // ---------------------------
+  // Helpers (robust getters)
+  // ---------------------------
+  const coerceNumber = (v: any, fallback: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
   };
 
-  const handlePrev = () => setCurrent((c) => Math.max(0, c - 1));
+  const getSchemaValues = () => {
+    // IMPORTANT: use getFieldsValue(true) so preserved-but-unmounted fields are included
+    const s = schemaForm.getFieldsValue(true) as any;
+    return {
+      name: s.name,
+      dim: coerceNumber(s.dim, initialSchema.dim),
+      metric: s.metric || initialSchema.metric,
+      index_type: s.index_type || initialSchema.index_type,
+      nlist: coerceNumber(
+        s.index_type && String(s.index_type).startsWith("IVF") ? s.nlist : initialSchema.nlist,
+        initialSchema.nlist,
+      ),
+    };
+  };
 
+  const getSourceValues = () => sourceForm.getFieldsValue(true) as any;
+  const getIngestValues = () => {
+    const i = ingestForm.getFieldsValue(true) as any;
+    return {
+      model: i.model || initialIngest.model,
+      normalize: !!i.normalize,
+      chunk_size: coerceNumber(i.chunk_size, initialIngest.chunk_size),
+      overlap: coerceNumber(i.overlap, initialIngest.overlap),
+      ocr: !!i.ocr,
+      language_detect: !!i.language_detect,
+      dedupe: !!i.dedupe,
+    };
+  };
+
+  const toRawFile = (f: UploadFile): File | Blob | null => {
+    const anyF: any = f;
+    if (anyF?.originFileObj instanceof File || anyF?.originFileObj instanceof Blob) return anyF.originFileObj;
+    if (anyF instanceof File || anyF instanceof Blob) return anyF;
+    return null;
+  };
+
+  const fileDisplayName = (f: UploadFile): string =>
+    (((f as any).originFileObj as any)?.webkitRelativePath) ||
+    (f as any).webkitRelativePath ||
+    f.name;
+
+  // ---------------------------
+  // Config preview (fix: no more empty collection/source)
+  // ---------------------------
   const buildConfig = () => {
-    const schema = schemaForm.getFieldsValue();
-    const source = sourceForm.getFieldsValue();
-    const ingest = ingestForm.getFieldsValue();
+    const schema = getSchemaValues();
+    const source = getSourceValues();
+    const ingest = getIngestValues();
+
     const cfg: any = {
       collection: {
         name: schema.name,
         dim: schema.dim,
         metric: schema.metric,
         index_type: schema.index_type,
-        nlist: schema.index_type?.startsWith("IVF") ? schema.nlist : undefined,
-      },
+        ...(String(schema.index_type).startsWith("IVF") ? { nlist: schema.nlist } : {}),
+    },
       source: { type: source.source_type },
       ingest: {
         model: ingest.model,
-        normalize: !!ingest.normalize,
+        normalize: ingest.normalize,
         chunk_size: ingest.chunk_size,
         overlap: ingest.overlap,
-        ocr: !!ingest.ocr,
-        language_detect: !!ingest.language_detect,
-        dedupe: !!ingest.dedupe,
+        ocr: ingest.ocr,
+        language_detect: ingest.language_detect,
+        dedupe: ingest.dedupe,
       },
     };
+
     if (source.source_type === "local") {
       cfg.source.path = source.local_path;
     } else if (source.source_type === "http") {
@@ -277,7 +359,7 @@ export default function CreateCollectionWizard({
     } else if (source.source_type === "ibm") {
       cfg.source = { type: "ibm", ...source.ibm };
     } else if (source.source_type === "upload") {
-      cfg.source.files = fileList.map((f) => (f as any).webkitRelativePath || f.name);
+      cfg.source.files = fileList.map(fileDisplayName);
     }
     return cfg;
   };
@@ -295,72 +377,73 @@ export default function CreateCollectionWizard({
     URL.revokeObjectURL(url);
   };
 
-  // Optional: Admin token header support (put it into localStorage if you use it)
+  // Admin token header (optional)
   const adminToken = (typeof window !== "undefined" && localStorage.getItem("adminToken")) || undefined;
   const buildHeaders = () => (adminToken ? { "X-Admin-Token": adminToken } : undefined);
 
-  // Upload with real progress
+  // Upload with real progress (let browser set the boundary)
   async function uploadWithProgress(fd: FormData, onProgress: (pct: number) => void) {
     const res = await axios.post("/api/ingest/upload", fd, {
-      headers: { "Content-Type": "multipart/form-data", ...(buildHeaders() || {}) },
+      headers: { ...(buildHeaders() || {}) },
       onUploadProgress: (evt) => {
         if (!evt.total) return;
         const pct = Math.round((evt.loaded * 100) / evt.total);
         onProgress(pct);
       },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      transformRequest: (d) => d,
     });
     return res.data;
   }
 
-  // Create + ingest flow
+  // Create + ingest flow (fix: always send JSON with the actual schema values)
   const createCollection = async () => {
-    const schema = await schemaForm.validateFields();
+    const schema = getSchemaValues();
+    if (!schema.name) {
+      message.error("Collection name is required.");
+      setCurrent(0);
+      return;
+    }
 
-    // 1) Create collection
-    await mutateAsync({
-      url: "/api/collections",
-      method: "post",
-      values: {
-        name: schema.name,
-        dim: schema.dim,
-        metric: schema.metric,
-        index_type: schema.index_type,
-        nlist: schema.index_type?.startsWith("IVF") ? schema.nlist : 1024,
-      },
-      meta: { headers: buildHeaders() },
-      successNotification: () => ({ message: "Collection created", description: "" }),
-      errorNotification: (err) => ({
-        message: "Create failed",
-        description: (err as any)?.response?.data?.detail || String(err),
-        type: "error",
-      }),
-    });
+    // 1) Create collection (direct axios to ensure JSON body + headers)
+    try {
+      await axios.post(
+        "/api/collections",
+        {
+          name: schema.name,
+          dim: schema.dim,
+          metric: schema.metric,
+          index_type: schema.index_type,
+          ...(String(schema.index_type).startsWith("IVF") ? { nlist: schema.nlist } : {}),
+        },
+        { headers: { "Content-Type": "application/json", ...(buildHeaders() || {}) } },
+      );
+      message.success("Collection created");
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || "Create failed");
+      return;
+    }
 
     setCreatedName(schema.name);
     onCreated?.(schema.name);
 
     // 2) Ingest
-    const source = sourceForm.getFieldsValue();
+    const source = getSourceValues();
+    const ingest = getIngestValues();
+
     if (source.source_type === "local") {
       try {
-        await mutateAsync({
-          url: "/api/sync",
-          method: "post",
-          meta: { headers: buildHeaders() },
-          successNotification: () => ({ message: "Ingest started", description: "Local sync triggered." }),
-          errorNotification: (err) => ({
-            message: "Sync failed",
-            description: (err as any)?.response?.data?.detail || String(err),
-            type: "error",
-          }),
-        });
+        await axios.post("/api/sync", undefined, { headers: { ...(buildHeaders() || {}) } });
         setSyncTriggered(true);
         setSuccess(true);
-      } catch {
-        /* handled by refine */
+      } catch (err: any) {
+        message.error(err?.response?.data?.detail || "Sync failed");
       }
-    } else if (source.source_type === "upload") {
-      const ingest = ingestForm.getFieldsValue();
+      return;
+    }
+
+    if (source.source_type === "upload") {
       const fd = new FormData();
       fd.append("collection", schema.name);
       if (ingest.model) fd.append("model", ingest.model);
@@ -371,13 +454,18 @@ export default function CreateCollectionWizard({
       fd.append("language_detect", String(!!ingest.language_detect));
       fd.append("dedupe", String(!!ingest.dedupe));
 
-      fileList.forEach((f) => {
-        const file = f.originFileObj as File;
-        if (file) {
-          fd.append("files", file, (f as any).webkitRelativePath || f.name);
-        }
-      });
+      const rawFiles = fileList
+        .map((f) => ({ raw: toRawFile(f), name: fileDisplayName(f) }))
+        .filter((x) => !!x.raw) as { raw: File | Blob; name: string }[];
 
+      if (!rawFiles.length) {
+        message.error("No files selected.");
+        return;
+      }
+
+      rawFiles.forEach(({ raw, name }) => fd.append("files", raw, name));
+
+      doneNotifiedRef.current = false;
       setUploading(true);
       setUploadPct(2);
 
@@ -394,7 +482,11 @@ export default function CreateCollectionWizard({
       } finally {
         setUploading(false);
       }
+      return;
     }
+
+    // http/s3/ibm -> just show success and offer config
+    setSuccess(true);
   };
 
   const onFinish = async () => {
@@ -409,6 +501,23 @@ export default function CreateCollectionWizard({
     { title: "Review", icon: <CheckCircleTwoTone twoToneColor="#52c41a" /> },
   ];
 
+  // --- Upload.Dragger props (CRITICAL): keep originFileObj via onChange + beforeUpload:false
+  const uploadProps: UploadProps = {
+    multiple: true,
+    directory: selectFolder,
+    accept: ACCEPTED_EXT,
+    fileList,
+    beforeUpload: () => false, // do not auto-upload
+    onChange: (info) => setFileList(info.fileList),
+    onRemove: (file) => {
+      setFileList((prev) => prev.filter((f) => f.uid !== file.uid));
+    },
+    // prevent network request while still updating UI
+    customRequest: ({ onSuccess }) => {
+      onSuccess && onSuccess({}, new XMLHttpRequest());
+    },
+  };
+
   const content = (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <Card style={{ borderRadius: 12 }}>
@@ -421,7 +530,7 @@ export default function CreateCollectionWizard({
           <Row gutter={[16, 16]}>
             <Col xs={24} md={12}>
               <Title level={5} style={{ marginTop: 0 }}>Collection schema</Title>
-              <Form form={schemaForm} layout="vertical" initialValues={initialSchema}>
+              <Form form={schemaForm} layout="vertical" preserve initialValues={initialSchema}>
                 <Form.Item label="Name" name="name" rules={[{ required: true }]}>
                   <Input placeholder="documents" />
                 </Form.Item>
@@ -479,7 +588,7 @@ export default function CreateCollectionWizard({
                   <ul style={{ margin: 0, paddingLeft: 18 }}>
                     <li>Match <strong>dim</strong> to your embedding model (e.g., MiniLM: 384d).</li>
                     <li><strong>IP</strong> or <strong>COSINE</strong> for sentence embeddings; <strong>L2</strong> for some image models.</li>
-                    <li>IVF needs <strong>nlist</strong>; HNSW uses efConstruction/M (server picks sensible defaults for search).</li>
+                    <li>IVF needs <strong>nlist</strong>; HNSW uses efConstruction/M (server picks sensible defaults).</li>
                   </ul>
                 }
               />
@@ -491,8 +600,10 @@ export default function CreateCollectionWizard({
           </Row>
           <Divider />
           <Space>
-            <Button onClick={onClose} disabled={isLoading}>Cancel</Button>
-            <Button type="primary" onClick={handleNext}>Next</Button>
+            <Button onClick={onClose}>Cancel</Button>
+            <Button type="primary" onClick={async () => { await schemaForm.validateFields(); setCurrent(1); }}>
+              Next
+            </Button>
           </Space>
         </Card>
       )}
@@ -503,7 +614,7 @@ export default function CreateCollectionWizard({
           <Row gutter={[16, 16]}>
             <Col xs={24} md={10}>
               <Title level={5} style={{ marginTop: 0 }}>Choose data source</Title>
-              <Form form={sourceForm} layout="vertical" initialValues={initialSource} requiredMark="optional">
+              <Form form={sourceForm} layout="vertical" preserve initialValues={initialSource} requiredMark="optional">
                 <Form.Item label="Source type" name="source_type" rules={[{ required: true }]}>
                   <Select options={SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))} />
                 </Form.Item>
@@ -515,26 +626,14 @@ export default function CreateCollectionWizard({
                       <Checkbox checked={selectFolder} onChange={(e) => setSelectFolder(e.target.checked)}>
                         Select folder (recursive)
                       </Checkbox>
-                      <Upload.Dragger
-                        multiple
-                        directory={selectFolder}
-                        accept={ACCEPTED_EXT}
-                        fileList={fileList}
-                        beforeUpload={(file) => {
-                          setFileList((prev) => [...prev, file]);
-                          return false; // prevent auto upload
-                        }}
-                        onRemove={(file) => {
-                          setFileList((prev) => prev.filter((f) => f.uid !== file.uid));
-                        }}
-                        itemRender={(originNode) => originNode}
-                      >
+
+                      <Upload.Dragger {...uploadProps}>
                         <p className="ant-upload-drag-icon">
                           <InboxOutlined />
                         </p>
-                        <p className="ant-upload-text">Click or drag {selectFolder ? "folder/files" : "files"} to this area to upload</p>
+                        <p className="ant-upload-text">Click or drag {selectFolder ? "folder/files" : "files"} to this area</p>
                         <p className="ant-upload-hint">
-                          Supported: {ACCEPTED_EXT.replaceAll(".", "").split(",").join(", ")}. Large datasets? Prefer S3/IBM COS.
+                          Supported: {ACCEPTED_EXT.replace(/\./g, "").split(",").join(", ")}. Large datasets? Prefer S3/IBM COS.
                         </p>
                       </Upload.Dragger>
 
@@ -544,11 +643,7 @@ export default function CreateCollectionWizard({
                           showIcon
                           style={{ borderRadius: 8 }}
                           message={`${fileList.length} item(s) selected`}
-                          description={
-                            <span>
-                              Example path: <code>{(fileList[0] as any).webkitRelativePath || fileList[0].name}</code>
-                            </span>
-                          }
+                          description={<span>Example path: <code>{fileDisplayName(fileList[0])}</code></span>}
                         />
                       )}
                     </Space>
@@ -638,8 +733,20 @@ export default function CreateCollectionWizard({
           </Row>
           <Divider />
           <Space>
-            <Button onClick={handlePrev}>Back</Button>
-            <Button type="primary" onClick={handleNext}>Next</Button>
+            <Button onClick={() => setCurrent(0)}>Back</Button>
+            <Button
+              type="primary"
+              onClick={async () => {
+                await sourceForm.validateFields();
+                if (sourceType === "upload" && fileList.length === 0) {
+                  message.warning("Please add at least one file (or a folder).");
+                  return;
+                }
+                setCurrent(2);
+              }}
+            >
+              Next
+            </Button>
           </Space>
         </Card>
       )}
@@ -647,10 +754,11 @@ export default function CreateCollectionWizard({
       {/* STEP 2: Ingest options */}
       {current === 2 && (
         <Card style={{ borderRadius: 12 }}>
-          <Row gutter={[16, 16]}>
-            <Col xs={24} md={12}>
-              <Title level={5} style={{ marginTop: 0 }}>Embeddings & chunking</Title>
-              <Form form={ingestForm} layout="vertical" initialValues={initialIngest}>
+          {/* SINGLE form wrapper for all ingest fields to prevent unregistration */}
+          <Form form={ingestForm} layout="vertical" preserve initialValues={initialIngest}>
+            <Row gutter={[16, 16]}>
+              <Col xs={24} md={12}>
+                <Title level={5} style={{ marginTop: 0 }}>Embeddings & chunking</Title>
                 <Form.Item
                   label={
                     <Space>
@@ -673,150 +781,191 @@ export default function CreateCollectionWizard({
                 <Form.Item label="Overlap" name="overlap" rules={[{ required: true }]}>
                   <InputNumber min={0} step={8} style={{ width: "100%" }} />
                 </Form.Item>
-              </Form>
-            </Col>
-            <Col xs={24} md={12}>
-              <Title level={5} style={{ marginTop: 0 }}>Preprocessing</Title>
-              <Form form={ingestForm} layout="vertical">
+              </Col>
+
+              <Col xs={24} md={12}>
+                <Title level={5} style={{ marginTop: 0 }}>Preprocessing</Title>
                 <Form.Item name="ocr" valuePropName="checked"><Checkbox>OCR scanned PDFs</Checkbox></Form.Item>
                 <Form.Item name="language_detect" valuePropName="checked"><Checkbox>Language detection</Checkbox></Form.Item>
                 <Form.Item name="dedupe" valuePropName="checked"><Checkbox>Deduplicate near-identical chunks</Checkbox></Form.Item>
-              </Form>
-              {sourceType === "upload" && (
-                <>
-                  {uploading && (
-                    <>
-                      <Divider />
-                      <Text type="secondary">Uploading…</Text>
-                      <Progress percent={uploadPct} status={uploadPct < 100 ? "active" : "success"} />
-                    </>
-                  )}
-                  {processingJobId && (
-                    <>
-                      <Divider />
-                      <Text type="secondary">Processing… {job?.stage ? `(${job.stage})` : ""}</Text>
-                      <Progress
-                        percent={typeof job?.progress === "number" ? job.progress : 0}
-                        status={job?.status === "error" ? "exception" : "active"}
-                      />
-                      <pre
-                        style={{
-                          maxHeight: 220,
-                          overflow: "auto",
-                          background: "#0b1220",
-                          color: "#e5e7eb",
-                          padding: 12,
-                          borderRadius: 8,
-                        }}
-                      >
-                        {job?.logs_tail || ""}
-                      </pre>
-                    </>
-                  )}
-                </>
-              )}
-              <Divider />
-              <Alert
-                type="info"
-                showIcon
-                message="Heads-up"
-                description={
-                  sourceType === "upload"
-                    ? "Files will be uploaded and ingested into the new collection after you click Create."
-                    : "These options are saved into a config for your ingestion jobs. The built-in /api/sync uses server defaults."
-                }
-              />
-            </Col>
-          </Row>
+
+                {/* Upload progress */}
+                {sourceType === "upload" && uploading && (
+                  <>
+                    <Divider />
+                    <Text type="secondary">Uploading…</Text>
+                    <Progress percent={uploadPct} status={uploadPct < 100 ? "active" : "success"} />
+                  </>
+                )}
+
+                {/* Processing animation & logs */}
+                {sourceType === "upload" && processingJobId && (
+                  <>
+                    <Divider />
+                    {processingSteps}
+                    <div style={{ marginTop: 8 }} />
+                    <Text type="secondary">Processing… {job?.stage ? `(${job.stage})` : ""}</Text>
+                    <Progress
+                      percent={typeof job?.progress === "number" ? job.progress : fakePct}
+                      status={job?.status === "error" ? "exception" : "active"}
+                    />
+                    <pre
+                      style={{
+                        maxHeight: 220,
+                        overflow: "auto",
+                        background: "#0b1220",
+                        color: "#e5e7eb",
+                        padding: 12,
+                        borderRadius: 8,
+                      }}
+                    >
+                      {job?.logs_tail || ""}
+                    </pre>
+                  </>
+                )}
+
+                <Divider />
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Heads-up"
+                  description={
+                    sourceType === "upload"
+                      ? "Files will be uploaded and ingested into the new collection after you click Create."
+                      : "These options are saved into a config for your ingestion jobs. The built-in /api/sync uses server defaults."
+                  }
+                />
+              </Col>
+            </Row>
+          </Form>
+
           <Divider />
           <Space>
-            <Button onClick={handlePrev}>Back</Button>
-            <Button type="primary" onClick={handleNext}>Next</Button>
+            <Button onClick={() => setCurrent(1)}>Back</Button>
+            <Button type="primary" onClick={() => setCurrent(3)}>Next</Button>
           </Space>
         </Card>
       )}
 
       {/* STEP 3: Review */}
       {current === 3 && !success && (
-        <Card style={{ borderRadius: 12 }}>
-          <Title level={5} style={{ marginTop: 0 }}>Review & create</Title>
-          <Tabs
-            items={[
-              {
-                key: "summary",
-                label: "Summary",
-                children: (
-                  <Space direction="vertical" style={{ width: "100%" }}>
-                    <Alert
-                      type="success"
-                      showIcon
-                      message="Ready to create"
-                      description={
-                        sourceType === "upload"
-                          ? "We’ll create the collection and upload your files for ingestion."
-                          : "We’ll create the collection now. For Local, a sync will be triggered."
-                      }
-                    />
-                    <Divider />
-                    <pre style={{ background: "#0b1220", color: "#e5e7eb", padding: 12, borderRadius: 8, overflowX: "auto" }}>
-                      <code>{JSON.stringify(buildConfig(), null, 2)}</code>
-                    </pre>
-                    {sourceType === "upload" && fileList.length > 0 && (
+        <Spin
+          spinning={sourceType === "upload" && (uploading || (processingJobId && !["done", "error"].includes(job?.status)))}
+          tip={job ? `Processing: ${job.stage || ""}` : "Starting…"}
+        >
+          <Card style={{ borderRadius: 12 }}>
+            <Title level={5} style={{ marginTop: 0 }}>Review & create</Title>
+            <Tabs
+              items={[
+                {
+                  key: "summary",
+                  label: "Summary",
+                  children: (
+                    <Space direction="vertical" style={{ width: "100%" }}>
                       <Alert
-                        type="info"
+                        type="success"
                         showIcon
-                        message="Upload overview"
-                        description={`${fileList.length} item(s) selected. First item: ${(fileList[0] as any).webkitRelativePath || fileList[0].name}`}
+                        message="Ready to create"
+                        description={
+                          sourceType === "upload"
+                            ? "We’ll create the collection and upload your files for ingestion."
+                            : "We’ll create the collection now. For Local, a sync will be triggered."
+                        }
                       />
-                    )}
-                    {processingJobId && (
-                      <Alert
-                        type={job?.status === "error" ? "error" : "info"}
-                        showIcon
-                        message={`Job ${processingJobId}`}
-                        description={`Status: ${job?.status || "starting"} • Stage: ${job?.stage || "-"}`}
-                      />
-                    )}
-                  </Space>
-                ),
-              },
-              {
-                key: "cli",
-                label: "CLI how-to",
-                children: (
-                  <>
-                    <Paragraph>
-                      For <Text code>http/s3/ibm</Text> sources, download the config and run your ingest locally:
-                    </Paragraph>
-                    <pre style={{ background: "#0b1220", color: "#e5e7eb", padding: 12, borderRadius: 8, overflowX: "auto" }}>
+                      <Divider />
+                      <pre style={{ background: "#0b1220", color: "#e5e7eb", padding: 12, borderRadius: 8, overflowX: "auto" }}>
+                        <code>{JSON.stringify(buildConfig(), null, 2)}</code>
+                      </pre>
+
+                      {/* Live processing view (same animation as AddDataWizard) */}
+                      {sourceType === "upload" && (uploading || processingJobId) && (
+                        <>
+                          <Divider />
+                          {processingSteps}
+                          <div style={{ marginTop: 8 }} />
+                          <Text type="secondary">Processing… {job?.stage ? `(${job.stage})` : ""}</Text>
+                          <Progress
+                            percent={
+                              uploading
+                                ? uploadPct
+                                : typeof job?.progress === "number"
+                                ? job.progress
+                                : fakePct
+                            }
+                            status={job?.status === "error" ? "exception" : "active"}
+                          />
+                          <pre
+                            style={{
+                              maxHeight: 220,
+                              overflow: "auto",
+                              background: "#0b1220",
+                              color: "#e5e7eb",
+                              padding: 12,
+                              borderRadius: 8,
+                            }}
+                          >
+                            {job?.logs_tail || ""}
+                          </pre>
+                        </>
+                      )}
+
+                      {sourceType === "upload" && fileList.length > 0 && (
+                        <Alert
+                          type="info"
+                          showIcon
+                          message="Upload overview"
+                          description={`${fileList.length} item(s) selected. First item: ${fileDisplayName(fileList[0])}`}
+                        />
+                      )}
+                      {processingJobId && (
+                        <Alert
+                          type={job?.status === "error" ? "error" : "info"}
+                          showIcon
+                          message={`Job ${processingJobId}`}
+                          description={`Status: ${job?.status || "starting"} • Stage: ${job?.stage || "-"}`}
+                        />
+                      )}
+                    </Space>
+                  ),
+                },
+                {
+                  key: "cli",
+                  label: "CLI how-to",
+                  children: (
+                    <>
+                      <Paragraph>
+                        For <Text code>http/s3/ibm</Text> sources, download the config and run your ingest locally:
+                      </Paragraph>
+                      <pre style={{ background: "#0b1220", color: "#e5e7eb", padding: 12, borderRadius: 8, overflowX: "auto" }}>
 {`# Save config
 mui-ingest --config ./milvus-ingest.<name>.json
 # Then (re)build vector DB
 mui-create-vectordb`}
-                    </pre>
-                  </>
-                ),
-              },
-            ]}
-          />
-          <Divider />
-          <Space>
-            <Button onClick={handlePrev}>Back</Button>
-            {["http", "s3", "ibm"].includes(sourceType) && (
-              <Button icon={<DownloadOutlined />} onClick={downloadConfig}>
-                Download config
+                      </pre>
+                    </>
+                  ),
+                },
+              ]}
+            />
+            <Divider />
+            <Space>
+              <Button onClick={() => setCurrent(2)}>Back</Button>
+              {["http", "s3", "ibm"].includes(sourceType) && (
+                <Button icon={<DownloadOutlined />} onClick={downloadConfig}>
+                  Download config
+                </Button>
+              )}
+              <Button
+                type="primary"
+                onClick={onFinish}
+                loading={uploading || !!processingJobId}
+                icon={<DatabaseOutlined />}
+              >
+                {sourceType === "upload" ? "Create & Upload" : sourceType === "local" ? "Create & Ingest" : "Create"}
               </Button>
-            )}
-            <Button
-              type="primary"
-              onClick={onFinish}
-              loading={isLoading || uploading || !!processingJobId}
-              icon={<DatabaseOutlined />}
-            >
-              {sourceType === "upload" ? "Create & Upload" : sourceType === "local" ? "Create & Ingest" : "Create"}
-            </Button>
-          </Space>
-        </Card>
+            </Space>
+          </Card>
+        </Spin>
       )}
 
       {/* Success result */}

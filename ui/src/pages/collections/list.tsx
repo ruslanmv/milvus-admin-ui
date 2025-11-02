@@ -34,9 +34,11 @@ import {
   MoreOutlined,
   InfoCircleOutlined,
   AppstoreAddOutlined,
+  CloudUploadOutlined, // NEW
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import CreateCollectionWizard from "./components/CreateCollectionWizard";
+import AddDataWizard from "./components/AddDataWizard"; // NEW
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -335,7 +337,7 @@ export default function CollectionsList() {
           _dim: dim,
           _metric: metric,
           _indexType: indexType,
-          _partitions: r.partitions?.length ?? r.partition_num ?? "—", // placeholder until server provides
+          _partitions: r.partitions?.length ?? r.partition_num ?? "—",
           _size: r.size_bytes ?? "—",
           _replicas: r.replicas ?? "—",
           _updated_at: r.updated_at ?? "—",
@@ -356,7 +358,6 @@ export default function CollectionsList() {
       await mutateAsync({
         url: "/api/sync",
         method: "post",
-        // No successNotification to avoid duplicate toast — we show banner instead
         errorNotification: (err) => ({
           message: "Sync failed",
           description: (err as any)?.response?.data?.detail || String(err),
@@ -386,6 +387,12 @@ export default function CollectionsList() {
 
   // Create wizard state
   const [createOpen, setCreateOpen] = useState(false);
+
+  // Add Data wizard state (NEW)
+  const [addOpen, setAddOpen] = useState<{ open: boolean; collection?: string }>({
+    open: false,
+    collection: undefined,
+  });
 
   // Table columns
   const columns = [
@@ -469,7 +476,7 @@ export default function CollectionsList() {
     {
       title: "Actions",
       dataIndex: "actions",
-      width: 320,
+      width: 420, // widened a bit to fit the new button
       render: (_: any, record: any) => {
         const menuItems = [
           {
@@ -520,6 +527,16 @@ export default function CollectionsList() {
             >
               Insert
             </Button>
+
+            {/* NEW: Add data (opens upload wizard for this existing collection) */}
+            <Button
+              size="small"
+              icon={<CloudUploadOutlined />}
+              onClick={() => setAddOpen({ open: true, collection: record.id })}
+            >
+              Add data
+            </Button>
+
             <Button size="small" icon={<ImportOutlined />} onClick={onSync} loading={isLoading}>
               Import
             </Button>
@@ -588,8 +605,9 @@ export default function CollectionsList() {
             </Title>
             <Paragraph type="secondary" style={{ margin: 0 }}>
               Create, sync, index and explore your Milvus datasets. Use <strong>View</strong> for schema & indexes,
-              <strong> Query</strong> to open RAG, <strong>Insert</strong> for quick docs, and <strong>Import</strong> to
-              run your ingest pipeline.
+              <strong> Query</strong> to open RAG, <strong>Insert</strong> for quick docs,{" "}
+              <strong>Add data</strong> to upload more files to an existing collection, and{" "}
+              <strong>Import</strong> to run your ingest pipeline.
             </Paragraph>
           </Col>
           <Col flex="none">{headerButtons}</Col>
@@ -648,6 +666,18 @@ export default function CollectionsList() {
           open={createOpen}
           onClose={() => setCreateOpen(false)}
           onCreated={async () => {
+            await tableQueryResult?.refetch?.();
+          }}
+        />
+      )}
+
+      {/* NEW: Add Data Wizard (modal) */}
+      {addOpen.open && addOpen.collection && (
+        <AddDataWizard
+          open={addOpen.open}
+          collection={addOpen.collection}
+          onClose={() => setAddOpen({ open: false, collection: undefined })}
+          onDone={async () => {
             await tableQueryResult?.refetch?.();
           }}
         />

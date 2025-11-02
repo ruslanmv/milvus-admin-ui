@@ -2,32 +2,72 @@
 #!/usr/bin/env python3
 """
 Milvus Admin UI backend (FastAPI)
+
+Features
+--------
 - Serves a static SPA from ui/static (Refine/Vite build)
 - REST API to inspect Milvus status, manage collections, and run a RAG demo
 - /api/sync endpoint to ingest local documents and (re)build the vector DB
 - /api/ingest/upload to upload files from the browser and ingest them
 - /api/jobs/* to track ingest progress & logs
 - /api/rag/models to list supported embedding models (dims, labels)
+- /api/rag/models_status to inspect preload/download state for all models
+- **Blocking model preload at startup** so all embeddings are ready before traffic
 
-Hardenings & QoL:
-- /api/collections now accepts JSON OR form bodies (fixes 422 if client sends form)
-- Infers dim from selected embedding model when not provided
-- Rich logs for each step
+Operational logging
+-------------------
+- Structured logs for request lifecycle, Milvus ops, and model preload
+- Per-request middleware: method, path, status, duration, client IP, UA
+- Clear, actionable errors with context and fallbacks
 
-Security defaults:
+Preload controls (env)
+----------------------
+RAG_PRELOAD              : "all" (default), "default", "off".
+  - all      -> preload all models in EMBED_MODEL_CATALOG
+  - default  -> preload only the default model (RAG_MODEL or first in catalog)
+  - off      -> no preload
+
+RAG_PRELOAD_STRATEGY     : "load" (default) or "download".
+  - load      -> ensure cache + load model into memory (fastest first request)
+  - download  -> only ensure model weights are cached on disk; load lazily later
+
+RAG_DEVICE               : "cpu", "cuda", or "auto" (default: auto).
+RAG_SECONDARY_DEVICE     : device for non-default models when strategy=load (default: "cpu")
+RAG_FORCE_CPU_ALL        : "1" -> force all models on CPU regardless of CUDA availability
+RAG_MAX_PARALLEL         : max concurrent downloads/loads (default: 2)
+RAG_MODEL                : default model id (overrides catalog default)
+RAG_EXTRA_MODELS         : comma-separated list of extra model ids to preload
+RAG_BATCH_SIZE           : batch size for encoding (default: 32)
+RAG_TORCH_NUM_THREADS    : set torch.set_num_threads if > 0 (default: 0 = leave default)
+HF_HOME / HUGGINGFACE_HUB_CACHE : cache dir for model downloads (must be writable)
+TORCH_HOME               : cache dir for torch
+
+Security defaults
+-----------------
 - /api/sync is LOCAL-ONLY by default; open with ALLOW_REMOTE_SYNC=true
 - /api/ingest/upload is REMOTE-ALLOWED by default; restrict with ALLOW_REMOTE_UPLOAD=false
 - Optional ADMIN_TOKEN header (X-Admin-Token) for /api/sync and /api/ingest/*
+
+Best practices baked in
+-----------------------
+- Build on CPU first, then attempt CUDA move (avoids “meta tensor” crashes).
+- If CUDA move fails, automatically keep the model on CPU and continue.
+- If a model is already cached, we **do not** re-download (local cache is tried first).
 """
+
 import os
 import uuid
 import logging
 import threading
 import urllib.request
+import time
+import socket
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from subprocess import run, CalledProcessError, Popen, PIPE
 from shutil import which
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv, find_dotenv
 from fastapi import (
@@ -61,7 +101,52 @@ log = logging.getLogger("milvus-admin-ui")
 # -----------------------------------------------------------------------------
 load_dotenv(find_dotenv(filename=".env", usecwd=True), override=False)
 
+# Quieter & safer defaults for HF/Transformers
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Avoid any accelerate-induced device moves by default during CPU build
+os.environ.setdefault("ACCELERATE_DISABLE_MPS_FALLBACK", "1")
+
+# Ensure HF/Torch cache dirs exist (prevents first-run surprises)
+for cache_var in ("HF_HOME", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME"):
+    cache_dir = os.getenv(cache_var)
+    if cache_dir:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception as e:
+            log.warning("%s set but not creatable (%s): %s", cache_var, cache_dir, e)
+
+# Optional torch threading perf knob
+try:
+    import torch  # type: ignore
+    _threads = int(os.getenv("RAG_TORCH_NUM_THREADS", "0"))
+    if _threads > 0:
+        torch.set_num_threads(_threads)
+        log.info("Torch threads set: %d", _threads)
+except Exception:
+    pass
+
+# -----------------------------------------------------------------------------
+# Embedding model state
+# -----------------------------------------------------------------------------
 _sentence_model = None
+_sentence_model_id: Optional[str] = None
+_model_lock = threading.Lock()
+
+# Model cache/status registry
+_MODEL_CACHE: Dict[str, Any] = {}  # id -> SentenceTransformer (when loaded)
+_MODEL_STATUS: Dict[str, Dict[str, Any]] = {}  # id -> status dict
+_MODEL_STATUS_LOCK = threading.Lock()
+
+def _set_model_status(mid: str, **fields):
+    with _MODEL_STATUS_LOCK:
+        st = _MODEL_STATUS.get(mid, {})
+        st.update(fields)
+        _MODEL_STATUS[mid] = st
+
+def _get_model_status_snapshot() -> Dict[str, Dict[str, Any]]:
+    with _MODEL_STATUS_LOCK:
+        return {k: dict(v) for k, v in _MODEL_STATUS.items()}
 
 # -----------------------------------------------------------------------------
 # Embedding model catalog (for UI + dim inference)
@@ -71,7 +156,7 @@ EMBED_MODEL_CATALOG: List[Dict[str, Any]] = [
     {"id": "sentence-transformers/all-MiniLM-L6-v2", "label": "all-MiniLM-L6-v2 (384d)", "dim": 384},
     {"id": "BAAI/bge-small-en-v1.5", "label": "bge-small-en-v1.5 (384d)", "dim": 384},
     {"id": "intfloat/e5-small-v2", "label": "e5-small-v2 (384d)", "dim": 384},
-    # Add more if needed (watch memory):
+    # For higher dims, be mindful of VRAM/CPU mem:
     # {"id": "BAAI/bge-base-en-v1.5", "label": "bge-base-en-v1.5 (768d)", "dim": 768},
     # {"id": "intfloat/e5-base-v2", "label": "e5-base-v2 (768d)", "dim": 768},
 ]
@@ -89,7 +174,6 @@ def _infer_dim_from_model(model_id: Optional[str]) -> int:
 # -----------------------------------------------------------------------------
 JOBS: Dict[str, Dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
-
 
 def _new_job(stage: str, total_steps: int = 3) -> Dict[str, Any]:
     job_id = uuid.uuid4().hex[:8]
@@ -111,7 +195,6 @@ def _new_job(stage: str, total_steps: int = 3) -> Dict[str, Any]:
     log.info("Job %s created (stage=%s)", job_id, stage)
     return job
 
-
 def _append_log(job_id: str, msg: str) -> None:
     line = f"[{datetime.utcnow().isoformat()}Z] {msg}"
     with JOBS_LOCK:
@@ -122,14 +205,12 @@ def _append_log(job_id: str, msg: str) -> None:
                 job["logs"] = job["logs"][-200:]
     log.debug("JOB %s: %s", job_id, msg)
 
-
 def _set_job(job_id: str, **kwargs) -> None:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is not None:
             job.update(kwargs)
     log.info("Job %s updated: %s", job_id, kwargs)
-
 
 def _run_cmd_stream(job_id: str, args: List[str], cwd: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> int:
     """Run a command and stream stdout/stderr to job logs."""
@@ -158,12 +239,15 @@ def _bool_env(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     return default if v is None else str(v).lower() in {"1", "true", "yes", "y"}
 
-
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except Exception:
         return default
+
+def _str_env(name: str, default: str) -> str:
+    v = os.getenv(name)
+    return default if v is None or v == "" else v
 
 # -----------------------------------------------------------------------------
 # Milvus connectivity
@@ -197,7 +281,6 @@ def _build_connect_kwargs() -> Dict[str, Any]:
         kwargs["db_name"] = db_name
     return kwargs
 
-
 def _connect_milvus() -> None:
     """Idempotent connect with the 'default' alias."""
     try:
@@ -207,7 +290,6 @@ def _connect_milvus() -> None:
     kwargs = _build_connect_kwargs()
     log.info("Connecting to Milvus: %s", kwargs.get("uri") or f"{kwargs.get('host')}:{kwargs.get('port')}")
     connections.connect(alias="default", **kwargs)
-
 
 def _healthz_http() -> Optional[bool]:
     host = os.getenv("MILVUS_HOST", "127.0.0.1")
@@ -250,7 +332,6 @@ def _ensure_collection(
         log.warning("load() warning for '%s': %s", name, e)
     return c
 
-
 def _list_collections_detailed() -> List[Dict[str, Any]]:
     names = utility.list_collections() or []
     out: List[Dict[str, Any]] = []
@@ -286,7 +367,6 @@ def _list_collections_detailed() -> List[Dict[str, Any]]:
             out.append({"name": n, "error": str(e)})
     return out
 
-
 def _introspect_collection(c: Collection) -> Dict[str, Any]:
     fields = c.schema.fields
     names = [f.name for f in fields]
@@ -313,7 +393,6 @@ def _introspect_collection(c: Collection) -> Dict[str, Any]:
         "all_fields": names,
         "default_output_fields": defaults,
     }
-
 
 def _search_params_for(c: Collection) -> Dict[str, Any]:
     try:
@@ -385,15 +464,248 @@ def _save_uploads(dest_root: str, files: List[UploadFile]) -> Tuple[int, int, Li
 # -----------------------------------------------------------------------------
 # Sentence embeddings (RAG demo)
 # -----------------------------------------------------------------------------
+def _has_cuda() -> bool:
+    try:
+        import torch  # type: ignore
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+def _select_device(preload: bool, is_default: bool) -> str:
+    """Choose device respecting env hints and availability."""
+    if _bool_env("RAG_FORCE_CPU_ALL", False):
+        return "cpu"
+    device_env = _str_env("RAG_DEVICE", "auto").lower()
+    secondary = _str_env("RAG_SECONDARY_DEVICE", "cpu").lower()
+    if device_env in {"cpu", "cuda"}:
+        return device_env if (is_default or preload) else secondary
+    return "cuda" if _has_cuda() else "cpu"
+
+def _ensure_snapshot_local(mid: str) -> Optional[str]:
+    """
+    Ensure a model snapshot exists locally.
+    - First try local cache only (no network).
+    - If not present, download snapshot (will be skipped if already cached).
+    Returns the local folder path or None on failure.
+    """
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception as e:
+        log.warning("huggingface_hub not installed; cannot snapshot_download: %s", e)
+        return None
+
+    try:
+        # Try local cache only — avoids re-download & network if already present
+        path = snapshot_download(repo_id=mid, local_files_only=True)
+        return path
+    except Exception:
+        pass
+    try:
+        path = snapshot_download(repo_id=mid, local_files_only=False)
+        return path
+    except Exception as e:
+        log.warning("snapshot_download failed for %s: %s", mid, e)
+        return None
+
+# --- Safe builders & progressive fallbacks -----------------------------------
+def _safe_build_st_pipeline(mid: str, cache_dir: Optional[str], variant: int = 1) -> "SentenceTransformer":
+    """
+    Build a SentenceTransformer pipeline explicitly to avoid meta-tensor issues.
+    variant:
+      1 -> models.Transformer(..., low_cpu_mem_usage=False, device_map=None)
+      2 -> models.Transformer(..., low_cpu_mem_usage=False, device_map='cpu')  # extra guard
+      3 -> SentenceTransformer(mid, device='cpu')                              # plain build
+      4 -> SentenceTransformer(mid, device='cpu', trust_remote_code=True)     # last resort
+    """
+    # Import locally to keep startup fast if not used
+    import torch
+    from sentence_transformers import SentenceTransformer, models
+
+    if variant in (1, 2):
+        # Explicit model_args forwarded into AutoModel/AutoTokenizer.from_pretrained
+        model_args = {
+            "low_cpu_mem_usage": False,          # ensure real tensors, not meta
+            "torch_dtype": torch.float32,        # stable dtype on CPU
+            "device_map": None if variant == 1 else "cpu",
+            "local_files_only": bool(cache_dir), # don't network if cache present
+            "trust_remote_code": True,           # safe for repos with custom heads
+        }
+        word = models.Transformer(mid, cache_dir=cache_dir, model_args=model_args)
+        # Mean pooling (SBERT default)
+        pooling = models.Pooling(word.get_word_embedding_dimension())
+        return SentenceTransformer(modules=[word, pooling], device="cpu")
+
+    # Plain constructor fallbacks
+    if variant == 3:
+        return SentenceTransformer(mid, device="cpu", cache_folder=cache_dir)
+
+    # variant 4
+    return SentenceTransformer(mid, device="cpu", cache_folder=cache_dir, trust_remote_code=True)
+
+def _safe_load_sentence_transformer(mid: str, target_device: str):
+    """
+    Robust loader that prevents the 'meta tensor' error:
+    - Build pipeline explicitly on CPU using 'low_cpu_mem_usage=False'.
+    - If that fails, progressively fallback to safer constructors.
+    - Optionally move to CUDA afterwards; if move fails, stay on CPU.
+    """
+    cache_path = _ensure_snapshot_local(mid)  # no-op if already cached
+    t0 = time.time()
+
+    last_err: Optional[Exception] = None
+    for variant in (1, 2, 3, 4):
+        try:
+            model = _safe_build_st_pipeline(mid, cache_dir=cache_path, variant=variant)
+            dur_cpu = time.time() - t0
+            log.info("Built pipeline variant=%s for %s (cpu-load=%.2fs)", variant, mid, dur_cpu)
+            break
+        except Exception as e:
+            last_err = e
+            log.warning("Build variant %s failed for %s: %s", variant, mid, e)
+            model = None
+    if model is None:
+        log.error("Failed to build model pipeline for %s after all fallbacks: %s", mid, last_err)
+        raise last_err if last_err else RuntimeError(f"Unknown error creating model {mid}")
+
+    # Move to CUDA if requested & available
+    final_device = "cpu"
+    if target_device == "cuda" and _has_cuda():
+        try:
+            t2 = time.time()
+            model.to("cuda")
+            final_device = "cuda"
+            log.info("Model move to CUDA ok: %s in %.2fs", mid, time.time() - t2)
+        except Exception as e:
+            if "Cannot copy out of meta tensor" in str(e) or isinstance(e, NotImplementedError):
+                log.warning("CUDA move failed for %s (meta tensor), staying on CPU: %s", mid, e)
+            else:
+                log.warning("CUDA move unexpected failure for %s, staying on CPU: %s", mid, e)
+
+    return model, final_device
+
 def _load_sentence_model(model_id: Optional[str] = None):
-    global _sentence_model
-    if _sentence_model is None or model_id:
-        from sentence_transformers import SentenceTransformer  # lazy import
-        if not model_id:
-            model_id = os.getenv("RAG_MODEL", EMBED_MODEL_CATALOG[0]["id"])
-        log.info("Loading sentence-transformer model: %s", model_id)
-        _sentence_model = SentenceTransformer(model_id)
+    """
+    Lazily load a sentence-transformer model once.
+    - device can be forced via RAG_DEVICE=cpu|cuda|auto (default: auto)
+    - guarded by a lock to avoid concurrent double-inits
+    - uses cache if model was preloaded
+    """
+    global _sentence_model, _sentence_model_id
+    mid = model_id or os.getenv("RAG_MODEL", EMBED_MODEL_CATALOG[0]["id"])
+    with _model_lock:
+        if _sentence_model is not None and _sentence_model_id == mid:
+            return _sentence_model
+        cached = _MODEL_CACHE.get(mid)
+        if cached is not None:
+            _sentence_model = cached
+            _sentence_model_id = mid
+            return _sentence_model
+
+        device_pref = _select_device(preload=False, is_default=True)
+        log.info("Loading sentence-transformer model safely: %s (pref=%s)", mid, device_pref)
+        model, final_dev = _safe_load_sentence_transformer(mid, device_pref)
+        _sentence_model = model
+        _sentence_model_id = mid
+        _MODEL_CACHE[mid] = model
+        _set_model_status(
+            mid,
+            loaded=True,
+            device=final_dev,
+            last_error=None,
+            last_loaded_at=datetime.utcnow().isoformat() + "Z",
+            stage="loaded",
+        )
     return _sentence_model
+
+def _preload_one_model(mid: str, strategy: str, is_default: bool) -> None:
+    """
+    Preload or download a model; record status and cache the instance when loaded.
+    """
+    t0 = time.time()
+    _set_model_status(mid, stage="starting", loaded=False, device=None, last_error=None)
+    try:
+        # Always ensure cache exists locally (no network if already present)
+        _ensure_snapshot_local(mid)
+
+        if strategy == "download":
+            dur = time.time() - t0
+            _set_model_status(mid, stage="downloaded", loaded=False, device=None, last_error=None, seconds=round(dur, 2))
+            log.info("✔ Preload(download) ensured cache: %s in %.2fs", mid, dur)
+        else:
+            device_target = _select_device(preload=True, is_default=is_default)
+            log.info("▶ Preload(load) start: %s (target=%s)", mid, device_target)
+            model, final_device = _safe_load_sentence_transformer(mid, device_target)
+            dur = time.time() - t0
+            with _MODEL_STATUS_LOCK:
+                _MODEL_CACHE[mid] = model
+            _set_model_status(
+                mid,
+                stage="loaded",
+                loaded=True,
+                device=final_device,
+                last_error=None,
+                seconds=round(dur, 2),
+                last_loaded_at=datetime.utcnow().isoformat() + "Z",
+            )
+            log.info("✔ Preload(load) ready: %s on %s in %.2fs", mid, final_device, dur)
+    except Exception as e:
+        dur = time.time() - t0
+        _set_model_status(mid, stage="error", loaded=False, device=None, last_error=str(e), seconds=round(dur, 2))
+        log.error("✖ Preload error for %s after %.2fs: %s", mid, dur, e)
+
+def _preload_models_blocking() -> None:
+    """
+    Block server startup until requested models are preloaded/downloaded.
+    """
+    mode = _str_env("RAG_PRELOAD", "all").lower()  # all | default | off
+    strat = _str_env("RAG_PRELOAD_STRATEGY", "load").lower()  # load | download
+    max_workers = max(1, _int_env("RAG_MAX_PARALLEL", 2))
+
+    if mode == "off":
+        log.info("Model preload disabled (RAG_PRELOAD=off).")
+        return
+
+    cat_ids = [m["id"] for m in EMBED_MODEL_CATALOG]
+    default_id = os.getenv("RAG_MODEL", cat_ids[0] if cat_ids else None)
+    if not default_id:
+        log.warning("No models in catalog; skipping preload.")
+        return
+
+    if mode == "default":
+        todo = [default_id]
+    else:
+        extras = [s.strip() for s in _str_env("RAG_EXTRA_MODELS", "").split(",") if s.strip()]
+        todo = list(dict.fromkeys([*cat_ids, *extras]))  # de-dupe, keep order
+
+    for mid in todo:
+        _set_model_status(mid, listed=True, stage="queued", loaded=False, device=None, last_error=None)
+
+    log.info("Preload plan: strategy=%s, mode=%s, workers=%d, models=%d", strat, mode, max_workers, len(todo))
+    t_all = time.time()
+
+    futures = []
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="preload") as ex:
+        for mid in todo:
+            is_default = (mid == default_id)
+            futures.append(ex.submit(_preload_one_model, mid, strat, is_default))
+
+        for i, fut in enumerate(as_completed(futures), 1):
+            try:
+                fut.result()
+            except Exception as e:
+                log.error("Preload worker raised: %s", e)
+            snap = _get_model_status_snapshot()
+            done = sum(1 for s in snap.values() if s.get("stage") in {"loaded", "downloaded", "error"})
+            log.info("Preload progress: %d/%d completed", done, len(todo))
+
+    dur_all = time.time() - t_all
+    snap = _get_model_status_snapshot()
+    loaded = [k for k, v in snap.items() if v.get("loaded")]
+    errors = {k: v.get("last_error") for k, v in snap.items() if v.get("stage") == "error"}
+    log.info("Preload finished in %.2fs — loaded=%d, errors=%d", dur_all, len(loaded), len(errors))
+    if errors:
+        for k, err in errors.items():
+            log.error("Preload error summary: %s -> %s", k, err)
 
 # -----------------------------------------------------------------------------
 # Schemas for API (used for validation/coercion)
@@ -422,9 +734,19 @@ class RagSearchReq(BaseModel):
     output_fields: Optional[List[str]] = None
 
 # -----------------------------------------------------------------------------
-# FastAPI app
+# FastAPI app (with lifespan for startup preload)
 # -----------------------------------------------------------------------------
-app = FastAPI(title="Milvus Admin UI", version="1.3")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        _preload_models_blocking()
+    except Exception as e:
+        # Let the app start; models can be loaded lazily per-request.
+        log.error("Startup preload encountered an error: %s", e)
+    yield
+    # No teardown needed
+
+app = FastAPI(title="Milvus Admin UI", version="1.6.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -433,6 +755,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Structured request logging middleware ---
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    path = request.url.path
+    log_static = _bool_env("LOG_STATIC", False)
+    if path.startswith("/static") and not log_static:
+        return await call_next(request)
+
+    t0 = time.time()
+    client = request.client.host if request.client else "-"
+    ua = request.headers.get("user-agent", "-")[:120]
+    method = request.method
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception as e:
+        status = 500
+        log.exception("HTTP %s %s failed: %s", method, path, e)
+        response = JSONResponse(content={"detail": "Internal Server Error"}, status_code=500)
+
+    dur = time.time() - t0
+    log.info("http method=%s path=%s status=%s dur=%.3fs ip=%s ua=%s", method, path, status, dur, client, ua)
+    return response
 
 api = APIRouter(prefix="/api", tags=["api"])
 
@@ -443,6 +789,11 @@ def api_ping():
 @api.get("/rag/models")
 def api_models():
     return {"models": EMBED_MODEL_CATALOG}
+
+@api.get("/rag/models_status")
+def api_models_status():
+    """Report preload/download status for each known/extra model."""
+    return {"status": _get_model_status_snapshot()}
 
 @api.get("/status")
 def api_status():
@@ -464,6 +815,7 @@ def api_status():
         "milvus_healthz_http": health,
         "server_version": version,
         "collections": _list_collections_detailed(),
+        "models_status": _get_model_status_snapshot(),
     }
 
 @api.get("/collections")
@@ -509,13 +861,12 @@ def api_get_collection(name: str):
         "schema_info": info,
     }
 
-# -------- FIX: accept JSON or Form for /collections (prevents 422) ----------
+# -------- Accept JSON or Form for /collections (prevents 422) ----------
 @api.post("/collections")
 async def api_create_collection(request: Request):
     """
     Create a collection. Accepts either JSON body or form-encoded fields.
-
-    Supported fields:
+    Fields:
       - name (str)  REQUIRED (default: 'documents' if omitted)
       - dim (int)   REQUIRED (if missing, inferred from 'model' or default 384)
       - metric (str)        default 'IP'
@@ -523,23 +874,20 @@ async def api_create_collection(request: Request):
       - nlist (int)         default 1024 (used for IVF*)
       - model (str)         optional, used only for inferring dim if not provided
     """
-    # Try JSON first, then form
     body: Dict[str, Any] = {}
     try:
         body = await request.json()
-        log.info("POST /collections received JSON: %s", body)
+        log.info("collections.create body(json)=%s", body)
     except Exception:
         try:
             form = await request.form()
             body = {k: v for k, v in form.items()}
-            log.info("POST /collections received FORM: %s", body)
+            log.info("collections.create body(form)=%s", body)
         except Exception:
-            log.warning("POST /collections: no body parsed")
+            log.warning("collections.create: no body parsed")
 
-    # Coerce types + defaults
     name = (body.get("name") or "documents").strip()
     model_hint = body.get("model")
-    # If dim is missing/empty, infer from model or fallback 384
     dim = body.get("dim")
     try:
         dim = int(dim) if dim not in (None, "",) else _infer_dim_from_model(model_hint)
@@ -554,16 +902,16 @@ async def api_create_collection(request: Request):
     except Exception:
         nlist = 1024
 
-    # Validate via Pydantic
     try:
         req = CreateCollectionReq(name=name, dim=dim, metric=metric, index_type=index_type, nlist=nlist)
     except ValidationError as ve:
-        log.error("Validation error for /collections: %s", ve)
+        log.error("collections.create validation error: %s", ve)
         raise HTTPException(status_code=422, detail=ve.errors())
 
     _connect_milvus()
+    t0 = time.time()
     coll = _ensure_collection(req.name, req.dim, req.metric, req.index_type, req.nlist)
-    log.info("Collection '%s' ready (entities=%s)", req.name, coll.num_entities)
+    log.info("collections.create ok name=%s entities=%s took=%.3fs", req.name, coll.num_entities, time.time()-t0)
     return {"ok": True, "collection": req.name, "num_entities": coll.num_entities}
 
 @api.delete("/collections/{name}")
@@ -572,7 +920,7 @@ def api_drop_collection(name: str):
     if not utility.has_collection(name):
         raise HTTPException(status_code=404, detail="Collection not found")
     utility.drop_collection(name)
-    log.info("Collection '%s' dropped", name)
+    log.info("collections.drop ok name=%s", name)
     return {"ok": True, "dropped": name}
 
 @api.post("/rag/insert")
@@ -592,17 +940,27 @@ def api_rag_insert(req: RagInsertReq):
             ),
         )
 
-    model = _load_sentence_model(req.model)
+    model = _MODEL_CACHE.get(req.model or os.getenv("RAG_MODEL", EMBED_MODEL_CATALOG[0]["id"])) or _load_sentence_model(req.model)
     texts = [d.text for d in req.docs]
-    log.info("Encoding %d docs for insert (model=%s)", len(texts), req.model or "default")
-    vecs = model.encode(texts, normalize_embeddings=True).tolist()
+    bs = _int_env("RAG_BATCH_SIZE", 32)
+    t0 = time.time()
+    log.info("rag.insert encoding count=%d batch=%d model=%s", len(texts), bs, req.model or "default")
+    vecs = model.encode(texts, batch_size=bs, normalize_embeddings=True, show_progress_bar=False).tolist()
     ids = [d.doc_id for d in req.docs]
+    log.info("rag.insert encode took=%.3fs", time.time() - t0)
 
     coll.insert([ids, texts, vecs])
+    # Force a flush so docs appear immediately for tests / interactive use
+    try:
+        coll.flush()
+        log.info("rag.insert flushed collection '%s'", req.collection)
+    except Exception as e:
+        log.warning("rag.insert flush warning: %s", e)
+
     try:
         coll.load()
     except Exception as e:
-        log.warning("load() after insert warning: %s", e)
+        log.warning("rag.insert load warning: %s", e)
 
     return {"ok": True, "inserted": len(ids), "collection": req.collection}
 
@@ -613,8 +971,10 @@ def api_rag_search(req: RagSearchReq):
         raise HTTPException(status_code=404, detail="Collection not found")
 
     coll = Collection(req.collection)
-    model = _load_sentence_model(req.model)
-    qv = model.encode([req.query], normalize_embeddings=True).tolist()
+    model = _MODEL_CACHE.get(req.model or os.getenv("RAG_MODEL", EMBED_MODEL_CATALOG[0]["id"])) or _load_sentence_model(req.model)
+    t0 = time.time()
+    qv = model.encode([req.query], batch_size=1, normalize_embeddings=True, show_progress_bar=False).tolist()
+    log.info("rag.search encode took=%.3fs", time.time() - t0)
 
     info = _introspect_collection(coll)
     vec_field = info["vector_field"]
@@ -632,8 +992,10 @@ def api_rag_search(req: RagSearchReq):
         pass
     params = _search_params_for(coll)
 
-    log.info("Search collection=%s field=%s params=%s", req.collection, vec_field, params)
+    t1 = time.time()
+    log.info("rag.search collection=%s field=%s params=%s", req.collection, vec_field, params)
     res = coll.search(qv, vec_field, param=params, limit=req.topk, output_fields=fields)
+    log.info("rag.search milvus took=%.3fs", time.time() - t1)
 
     hits_out: List[Dict[str, Any]] = []
     for hits in res:
@@ -678,15 +1040,15 @@ def api_sync(request: Request):
     create_exe = _which_or(os.path.join(vbin, "mui-create-vectordb"), "mui-create-vectordb")
     source_root = os.getenv("DATA_SOURCE_ROOT", os.path.join(root, "data"))
 
-    log.info("SYNC: source_root=%s", source_root)
+    log.info("sync start source_root=%s", source_root)
     try:
         r1 = run([ingest_exe, "--source-root", source_root], check=True, capture_output=True, text=True, cwd=root)
         r2 = run([create_exe], check=True, capture_output=True, text=True, cwd=root)
-        log.info("SYNC complete")
+        log.info("sync complete")
         return {"ok": True, "logs": {"ingest": r1.stdout[-4000:], "create": r2.stdout[-4000:]}}
     except CalledProcessError as e:
         err = (e.stderr or str(e))
-        log.error("SYNC failed: %s", err)
+        log.error("sync failed: %s", err)
         raise HTTPException(status_code=500, detail=f"sync failed: {err}")
 
 # -----------------------------------------------------------------------------
@@ -698,7 +1060,9 @@ async def api_ingest_upload(
     collection: str = Form(...),
     model: Optional[str] = Form(None),
     chunk_size: int = Form(512),
+    #chunk_size: Optional[str] = Form(None),
     overlap: int = Form(64),
+    #overlap: Optional[str] = Form(None),
     normalize: bool = Form(False),
     ocr: bool = Form(False),
     language_detect: bool = Form(True),
@@ -794,7 +1158,7 @@ async def api_ingest_upload(
 
     threading.Thread(target=_worker, daemon=True).start()
 
-    log.info("Upload saved for collection=%s; job=%s; dest=%s; files=%d; bytes=%d",
+    log.info("upload saved collection=%s job=%s dest=%s files=%d bytes=%d",
              collection, job_id, dest_root, saved_count, total_bytes)
 
     return {
@@ -860,9 +1224,21 @@ def spa_fallback(path: str):
         return FileResponse(index_path)
     raise HTTPException(status_code=404, detail="UI not built")
 
-# Entrypoint
+# -----------------------------------------------------------------------------
+# Entrypoint (CLI)
+# -----------------------------------------------------------------------------
+def _port_available(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        return s.connect_ex((probe_host, port)) != 0
+
 if __name__ == "__main__":
     import uvicorn
+    host = os.getenv("UI_HOST", "0.0.0.0")
     port = int(os.getenv("UI_PORT", "7860"))
+    if not _port_available(host, port):
+        log.error("Port %s on %s appears to be in use. Exiting to avoid duplicate server.", port, host)
+        raise SystemExit(1)
     log.info("* Milvus Admin UI: http://127.0.0.1:%s", port)
-    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("server:app", host=host, port=port, reload=False, workers=1, log_level=LOG_LEVEL.lower())

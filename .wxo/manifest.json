@@ -1,13 +1,4 @@
 {
-  "data_root": "/Users/ruslanmv/workspace/milvus-admin-ui/data",
-  "collections": {
-    "documents": {
-      "collection": "documents",
-      "bucket": null
-    },
-    "presentations": {
-      "collection": "presentations",
-      "bucket": null
-    }
-  }
+  "data_root": "/mnt/c/workspace/milvus-admin-ui/uploads/documents6/20251102T200131Z_80798a6f",
+  "collections": {}
 }
