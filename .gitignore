@@ -1,0 +1,136 @@
+/backup
+################################################################################
+# Python / FastAPI backend
+################################################################################
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+*.env.bak
+.python-version
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# PyInstaller
+*.spec
+
+# pytest / coverage / mypy / etc.
+.coverage
+.coverage.*
+.cache/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+ruff_cache/
+
+# IDE helpers
+.vscode/
+.idea/
+*.swp
+*.swo
+
+
+################################################################################
+# Node / React frontend
+################################################################################
+
+# Node dependencies
+node_modules/
+**/node_modules/
+
+# Build output (Refine/Vite build goes to ui/static)
+ui/static/
+dist/
+build/
+*.log
+
+# Lockfiles (optional: uncomment if you don't want to commit lockfiles)
+# package-lock.json
+# pnpm-lock.yaml
+# yarn.lock
+
+
+################################################################################
+# Runtime data / local state
+################################################################################
+
+# Milvus volumes, MinIO data, etcd data
+volumes/
+uploads/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local cache from ingestion / temporary staging
+*.tmp
+*.temp
+tmp/
+temp/
+cache/
+logs/
+*.log
+nohup.out
+
+# Job logs or debug dumps
+job_*.log
+*.trace
+*.profile
+
+
+################################################################################
+# Env / secrets
+################################################################################
+
+.env
+.env.*
+!.env.example   # keep a clean example config in repo, if you add one
+*.key
+*.crt
+*.pem
+*.pfx
+*.enc
+*.secret
+secrets/
+secret/
+certs/
+credentials.json
+
+
+################################################################################
+# OS / editor cruft
+################################################################################
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux / misc
+.nfs*
+.*~
+
+uv.lock

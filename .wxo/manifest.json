@@ -1,0 +1,13 @@
+{
+  "data_root": "/Users/ruslanmv/workspace/milvus-admin-ui/data",
+  "collections": {
+    "documents": {
+      "collection": "documents",
+      "bucket": null
+    },
+    "presentations": {
+      "collection": "presentations",
+      "bucket": null
+    }
+  }
+}
