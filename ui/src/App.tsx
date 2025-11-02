@@ -46,10 +46,11 @@ export default function App() {
           dataProvider={dataProvider()}
           notificationProvider={notificationProvider}
           resources={[
+            { name: "notes", list: "/notes", meta: { label: "About" } },
             { name: "status", list: "/status", meta: { label: "Status" } },
             { name: "collections", list: "/collections", create: "/collections/create" },
             { name: "rag", list: "/rag", meta: { label: "RAG" } },
-            { name: "notes", list: "/notes", meta: { label: "Notes" } },
+
           ]}
           options={{ syncWithLocation: true }}
         >
