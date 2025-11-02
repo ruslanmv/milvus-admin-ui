@@ -428,6 +428,55 @@ export default function CollectionsList() {
       render: (v: number) => <Text strong>{v ?? 0}</Text>,
       sorter: (a: any, b: any) => (a.num_entities ?? 0) - (b.num_entities ?? 0),
     },
+
+    // ⬇️ Moved Actions column here (immediately after Entities)
+    {
+      title: "Actions",
+      dataIndex: "actions",
+      width: 420,
+      render: (_: any, record: any) => {
+        const menuItems = [
+          { key: "build", label: "Build index", icon: <DeploymentUnitOutlined />, onClick: () => notYet("Build index") },
+          { key: "dropidx", label: "Drop index", danger: true, onClick: () => notYet("Drop index") },
+          { type: "divider" as const },
+          { key: "load", label: "Load", onClick: () => notYet("Load collection") },
+          { key: "release", label: "Release", onClick: () => notYet("Release collection") },
+          { type: "divider" as const },
+          { key: "backup", label: "Backup/Export", icon: <ExportOutlined />, onClick: () => notYet("Backup & export") },
+          { key: "rename", label: "Rename", icon: <EditOutlined />, onClick: () => notYet("Rename collection") },
+        ];
+        return (
+          <Space wrap>
+            <Button size="small" icon={<EyeOutlined />} onClick={() => setDetails({ open: true, name: record.id })}>
+              View
+            </Button>
+            <Button size="small" icon={<SearchOutlined />} onClick={() => navigate("/rag", { state: { collection: record.id } })}>
+              Query
+            </Button>
+            <Button size="small" icon={<PlusOutlined />} onClick={() => navigate("/rag", { state: { tab: "insert", collection: record.id } })}>
+              Insert
+            </Button>
+            <Button size="small" icon={<CloudUploadOutlined />} onClick={() => setAddOpen({ open: true, collection: record.id })}>
+              Add data
+            </Button>
+            <Button size="small" icon={<ImportOutlined />} onClick={onSync} loading={isLoading}>
+              Import
+            </Button>
+            <Dropdown menu={{ items: menuItems }} trigger={["click"]}>
+              <Button size="small" icon={<MoreOutlined />} />
+            </Dropdown>
+            <DeleteButton
+              size="small"
+              resource="collections"
+              recordItemId={record.id}
+              confirmTitle={`Drop collection "${record.id}"?`}
+              confirmOkText="Drop"
+            />
+          </Space>
+        );
+      },
+    },
+
     {
       title: "Dim / Metric",
       width: 180,
@@ -472,87 +521,6 @@ export default function CollectionsList() {
       width: 200,
       render: (v: any) => dash(v),
       responsive: ["xl"],
-    },
-    {
-      title: "Actions",
-      dataIndex: "actions",
-      width: 420, // widened a bit to fit the new button
-      render: (_: any, record: any) => {
-        const menuItems = [
-          {
-            key: "build",
-            label: "Build index",
-            icon: <DeploymentUnitOutlined />,
-            onClick: () => notYet("Build index"),
-          },
-          {
-            key: "dropidx",
-            label: "Drop index",
-            danger: true,
-            onClick: () => notYet("Drop index"),
-          },
-          { type: "divider" as const },
-          { key: "load", label: "Load", onClick: () => notYet("Load collection") },
-          { key: "release", label: "Release", onClick: () => notYet("Release collection") },
-          { type: "divider" as const },
-          {
-            key: "backup",
-            label: "Backup/Export",
-            icon: <ExportOutlined />,
-            onClick: () => notYet("Backup & export"),
-          },
-          {
-            key: "rename",
-            label: "Rename",
-            icon: <EditOutlined />,
-            onClick: () => notYet("Rename collection"),
-          },
-        ];
-        return (
-          <Space wrap>
-            <Button size="small" icon={<EyeOutlined />} onClick={() => setDetails({ open: true, name: record.id })}>
-              View
-            </Button>
-            <Button
-              size="small"
-              icon={<SearchOutlined />}
-              onClick={() => navigate("/rag", { state: { collection: record.id } })}
-            >
-              Query
-            </Button>
-            <Button
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={() => navigate("/rag", { state: { tab: "insert", collection: record.id } })}
-            >
-              Insert
-            </Button>
-
-            {/* NEW: Add data (opens upload wizard for this existing collection) */}
-            <Button
-              size="small"
-              icon={<CloudUploadOutlined />}
-              onClick={() => setAddOpen({ open: true, collection: record.id })}
-            >
-              Add data
-            </Button>
-
-            <Button size="small" icon={<ImportOutlined />} onClick={onSync} loading={isLoading}>
-              Import
-            </Button>
-            <Dropdown menu={{ items: menuItems }} trigger={["click"]}>
-              <Button size="small" icon={<MoreOutlined />} />
-            </Dropdown>
-            <DeleteButton
-              size="small"
-              resource="collections"
-              recordItemId={record.id}
-              confirmTitle={`Drop collection "${record.id}"?`}
-              confirmOkText="Drop"
-            />
-          </Space>
-        );
-      },
     },
   ] as any;
 
