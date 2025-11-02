@@ -112,12 +112,12 @@ ALLOW_REMOTE_SYNC=false           # keep /api/sync local-only by default
 
 ```mermaid
 graph TD
-    A[Browser files] -->|multipart/form-data| B[/api/ingest/upload/]
+    A[Browser files] -->|multipart| B[/api/ingest/upload/]
     B -->|save to UPLOAD_WORKDIR| C[Background Job]
-    C --> D["mui-ingest --source-root <job_dir>"]
+    C --> D["mui-ingest --source-root &lt;job_dir&gt;"]
     D --> E[mui-create-vectordb]
-    E --> F[Milvus Collection + Index]
-    C -->|/api/jobs/{id}| G[UI: progress bars + logs]
+    E --> F[Milvus collection + index]
+    C -->|/api/jobs/id| G["UI progress + logs"]
 ```
 
 ---
