@@ -56,7 +56,7 @@ node_modules/
 **/node_modules/
 
 # Build output (Refine/Vite build goes to ui/static)
-ui/static/
+
 dist/
 build/
 *.log
@@ -134,3 +134,4 @@ $RECYCLE.BIN/
 .*~
 
 uv.lock
+/ui/static/assets
