@@ -1,8 +1,8 @@
 <h1 align="center">milvus-admin-ui</h1>
 
 <p align="center">
-  <b>Manage, Ingest & RAG with your Vector DB in minutes</b><br/>
-  FastAPI + React + Ant Design admin with browser uploads, background jobs, and a clean REST API.
+  <b>Manage, Ingest & Build RAG over your Vector DB in minutes</b><br/>
+  Production-ready FastAPI backend + lightweight UI with browser uploads, background jobs, and a clean REST API.
 </p>
 
 <p align="center">
@@ -13,8 +13,9 @@
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"/>
   </a>
   <img src="https://img.shields.io/badge/python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11"/>
-  <img src="https://img.shields.io/badge/FastAPI-0.110+-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/FastAPI-0.110%2B-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI"/>
   <img src="https://img.shields.io/badge/Vector%20DB-Milvus%202.4.x-21D789?style=flat-square" alt="Milvus"/>
+  <img src="https://img.shields.io/badge/Extraction-Docling-4B8BBE?style=flat-square" alt="Docling"/>
   <img src="https://img.shields.io/badge/Frontend-React%20%2B%20Ant%20Design-1677FF?style=flat-square" alt="React + Ant Design"/>
 </p>
 
@@ -23,19 +24,43 @@
 </p>
 
 ![](assets/2025-11-02-14-36-46.png)
+
 ---
 
 ## ✨ What you get
 
-- 🧭 **Status & health** — server version, healthz, collections, indexes, and entity counts.
-- 🧰 **Collection management** — create/drop, metric (IP/L2/COSINE), index (IVF/HNSW/AUTOINDEX).
-- 🚀 **RAG demo** — quick insert & search with sentence-transformers, model auto-selection.
-- 📥 **File Ingestion Wizard** — **browser uploads** with live **upload** and **processing** progress, plus server-side sync.
-- 🌐 **Multiple sources** — Browser, Local folder (server), HTTP URLs, S3, IBM COS (config generator).
-- 🧵 **Background jobs** — `/api/jobs/{id}` live progress (stages: saved → ingest → index → done) and log tails.
-- 🧪 **Model-aware UX** — backend exposes model catalog + dims; UI keeps the embedding dimension in sync.
-- 🔐 **Security controls** — `X-Admin-Token`, `ALLOW_REMOTE_UPLOAD`, `ALLOW_REMOTE_SYNC`.
-- ⚙️ **Batteries included** — minimal env config, zero-setup defaults, Docker-friendly.
+- 🧭 **Status & health** — server version, Milvus health endpoints, collections, indexes, and entity counts.
+- 🧰 **Collection lifecycle** — create/drop, metric (IP/L2/COSINE), index (IVF/HNSW/AUTOINDEX), load/release.
+- 🚀 **RAG demo** — quick insert & search using sentence-transformers; model catalog exposes correct vector dims.
+- 📥 **File Ingestion Wizard** — **browser uploads** with live progress + server-side sync. Background jobs expose stage + logs.
+- 🧵 **Background jobs** — `/api/jobs/{id}` with stages (saved → ingest → index → done) and tail-able logs for observability.
+- 🧪 **Model-aware UX** — backend exposes supported embedding models and dimensions; UI enforces schema alignment.
+- 🔐 **Enterprise controls** — `X-Admin-Token`, `ALLOW_REMOTE_UPLOAD`, `ALLOW_REMOTE_SYNC`, predictable API surface.
+- ⚙️ **Batteries included** — dockerized Milvus, simple `.env`, clean Python packaging, CI-friendly test scripts.
+
+---
+
+## 🧾 Docling-powered Document Extraction
+
+This project integrates a production-ready extraction layer that uses **Docling** to convert heterogeneous documents into normalized **Markdown → text chunks** as part of the ingestion pipeline.
+
+**Why this matters in enterprise:**
+
+- **Broad format coverage** — PDF, Office (Word/PowerPoint/Excel), HTML/Markdown, TXT/RTF, CSV/JSON/JSONL, EPUB, and images.
+- **Consistent structure** — Markdown export harmonizes headings/sections for predictable chunking.
+- **Low-latency ingestion** — in-process streaming conversion reduces memory and avoids temp files.
+- **Scalable chunking** — tunable `chunk_size`/`overlap`, language detection, and content de-duplication.
+- **Operational safety** — stable chunk IDs, deterministic normalization, schema guardrails for vector dims.
+- **Observability** — fine-grained timing for convert/export/chunking with aggregated per-job stats.
+
+> Docling is part of the ingestion workflow. No extra action is required during normal usage.
+
+### Supported at a glance
+
+- **Documents:** `.pdf`, `.doc/.docx`, `.ppt/.pptx`, `.rtf`, `.epub`
+- **Web/markup:** `.html/.htm`, `.md/.mdx`, `.txt`
+- **Data files:** `.csv`, `.json`, `.jsonl`, `.xls/.xlsx`
+- **Images (OCR path):** `.png`, `.jpg/.jpeg`, `.tif/.tiff`, `.bmp`, `.gif`, `.webp`
 
 ---
 
@@ -62,8 +87,105 @@ make run
 > docker compose -f milvus.docker-compose.yml up -d
 > python ui/server.py
 > ```
+>
+> **(Optional) Build frontend:** `npm i && npm run build` → `ui/static`.
 
-> **(Optional) Build frontend:** `npm i && npm run build` (outputs to `ui/static`).
+---
+
+## 🧙 Ingestion Wizard (end-to-end flow)
+
+1. **Select source:** Browser upload, server folder, HTTP URLs, S3/IBM COS (config generator provided).
+2. **Choose options:** embedding model, chunk size/overlap, OCR, language detection, de-duplication.
+3. **Run:** follow **Upload** progress and **Processing** (background job) with live logs.
+4. **Serve:** vectors are inserted and indexes built; the collection is loaded for search.
+
+**Pipeline overview**
+
+```mermaid
+graph TD
+    %% Define distinct node styles for clarity
+    style U fill:#d5f3d5,stroke:#3c803c,stroke-width:2px,color:#1e4d1e
+    style S fill:#f9f9db,stroke:#8c8c27,stroke-width:2px,color:#5c5c1a
+    style W fill:#efefef,stroke:#999,stroke-dasharray: 5 5
+    style J fill:#dbe7ff,stroke:#5588cc,stroke-width:2px,color:#2c4b82
+    style L fill:#dbe7ff,stroke:#5588cc,stroke-width:2px,color:#2c4b82
+    style X fill:#ffe0e0,stroke:#cc5555,stroke-width:2px,color:#822c2c
+    style C fill:#ffe0e0,stroke:#cc5555,stroke-width:2px,color:#822c2c
+    style E fill:#ffe0e0,stroke:#cc5555,stroke-width:2px,color:#822c2c
+    style V fill:#e0f7fa,stroke:#00bcd4,stroke-width:2px,color:#00796b
+
+    %% Nodes
+    U[User / Browser Upload]
+    S[/api/ingest/upload/]
+    W{Upload Workdir}
+    J((Background Job))
+    X(Docling Extraction → Markdown)
+    C(Chunking / Dedup / Metadata)
+    E(Embedding)
+    V[(Milvus Vector DB)]
+    L[api jobs id logs progress]
+
+    %% Connections
+    U -- multipart --> S
+    S --> W
+    W --> J
+
+    %% Parallel Path for Job Status
+    J --> L
+
+    %% Sequential Processing within the Job
+    J --> X
+    X --> C
+    C --> E
+    E --> V
+```
+
+---
+
+## 🔌 API Reference (cURL)
+
+**Status**
+
+```bash
+curl -s http://127.0.0.1:7860/api/status | jq .
+```
+
+**Create a collection**
+
+```bash
+curl -X POST http://127.0.0.1:7860/api/collections \
+  -H "Content-Type: application/json" \
+  -d '{"name":"documents","dim":384,"metric":"IP","index_type":"IVF_FLAT","nlist":1024}'
+```
+
+**Upload + ingest**
+
+```bash
+curl -X POST http://127.0.0.1:7860/api/ingest/upload \
+  -F "collection=documents" \
+  -F "model=sentence-transformers/all-MiniLM-L6-v2" \
+  -F "chunk_size=512" -F "overlap=64" \
+  -F "normalize=true" -F "ocr=false" -F "language_detect=true" -F "dedupe=true" \
+  -F "files=@/path/to/Guide.pdf"
+```
+
+**Job progress**
+
+```bash
+curl http://127.0.0.1:7860/api/jobs/<job_id>
+```
+
+---
+
+## 🧪 Testing & Diagnostics
+
+* **End-to-end RAG**: `scripts/test_workflow.sh` (creates a collection, inserts, searches).
+* **Docling smoke test**: `scripts/test_docling.sh` + `tests/test_docling.py`
+
+  * Generates a small corpus (MD/HTML/TXT/CSV/JSON; PDF optional) and validates the conversion pipeline.
+  * Prints timing for **convert**, **export**, **native I/O**, **chunking**, and aggregates for quick bottleneck analysis.
+
+> These tests are CI-friendly and provide actionable logs for performance and stability tuning.
 
 ---
 
@@ -76,7 +198,7 @@ Create a minimal `.env` (defaults shown):
 MILVUS_HOST=127.0.0.1
 MILVUS_PORT=19530
 MILVUS_HEALTH_PORT=9091
-# MILVUS_URI=                  # alternative to host/port (e.g., http://host:19530)
+# MILVUS_URI=                  # alternative to host/port
 # MILVUS_USER=
 # MILVUS_PASSWORD=
 # MILVUS_DB=
@@ -86,158 +208,58 @@ UI_PORT=7860
 
 # --- Ingest defaults ---
 RAG_MODEL=sentence-transformers/all-MiniLM-L6-v2
-DATA_SOURCE_ROOT=./data           # server-side source root
-UPLOAD_WORKDIR=./uploads          # where browser uploads are stored
+DATA_SOURCE_ROOT=./data
+UPLOAD_WORKDIR=./uploads
 
 # --- Search tuning (optional) ---
 MILVUS_NPROBE=10
 MILVUS_EF=64
 
 # --- Security ---
-ALLOW_REMOTE_UPLOAD=true          # enable browser uploads from other hosts
-ALLOW_REMOTE_SYNC=false           # keep /api/sync local-only by default
-# ADMIN_TOKEN=change-me           # require X-Admin-Token for /api/ingest/* and /api/sync
-```
-
----
-
-## 🧙 Ingestion Wizard (How it works)
-
-1. **Choose source** — Upload from browser, Local, HTTP, S3, IBM COS.
-2. **Set options** — embedding model, chunk size/overlap, OCR, language detect, dedupe.
-3. **Review** — confirm files & options; for cloud sources, download a ready-to-run JSON config.
-4. **Run** — see **Upload** progress (bytes) and **Processing** progress (background job) with live logs.
-
-**Flow (Mermaid):**
-
-```mermaid
-graph TD
-    A[Browser files] -->|multipart| B[/api/ingest/upload/]
-    B -->|save to UPLOAD_WORKDIR| C[Background Job]
-    C --> D["mui-ingest --source-root &lt;job_dir&gt;"]
-    D --> E[mui-create-vectordb]
-    E --> F[Milvus collection + index]
-    C -->|/api/jobs/id| G["UI progress + logs"]
-```
-
----
-
-## 🔌 API Reference (cURL)
-
-**List status**
-
-```bash
-curl -s http://127.0.0.1:7860/api/status | jq .
-```
-
-**Create a collection (JSON or form-encoded)**
-
-```bash
-curl -X POST http://127.0.0.1:7860/api/collections \
-  -H "Content-Type: application/json" \
-  -d '{"name":"documents","dim":384,"metric":"IP","index_type":"IVF_FLAT","nlist":1024}'
-```
-
-**Upload a file and trigger ingest**
-
-```bash
-curl -X POST http://127.0.0.1:7860/api/ingest/upload \
-  -F "collection=documents" \
-  -F "model=sentence-transformers/all-MiniLM-L6-v2" \
-  -F "chunk_size=512" -F "overlap=64" \
-  -F "normalize=true" -F "ocr=false" -F "language_detect=true" -F "dedupe=true" \
-  -F "files=@/path/to/Guide.pdf"
-# -> {"ok":true,"job":{"id":"abcd1234",...}}
-```
-
-**Track job**
-
-```bash
-curl http://127.0.0.1:7860/api/jobs/abcd1234
-```
-
----
-
-## 🧪 RAG Demo (Insert & Search)
-
-**Python (requests)**
-
-```python
-import requests, json
-BASE = "http://127.0.0.1:7860"
-
-# Insert two demo docs for the simple [doc_id, text, vec] schema
-requests.post(f"{BASE}/api/rag/insert", json={
-  "collection":"documents",
-  "docs":[
-    {"doc_id":"1","text":"How do I reset my LDAP password?"},
-    {"doc_id":"2","text":"Postmortem template for production incidents."}
-  ]
-})
-
-# Semantic search
-r = requests.post(f"{BASE}/api/rag/search", json={
-  "collection":"documents", "query":"Where is the incident template?", "topk":3
-})
-print(json.dumps(r.json(), indent=2))
-```
-
-**PyMilvus (raw search with your own embeddings)**
-
-```python
-from pymilvus import connections, Collection
-from sentence_transformers import SentenceTransformer
-
-connections.connect(host="127.0.0.1", port="19530")
-c = Collection("documents"); c.load()
-
-model = SentenceTransformer("sentence-transformers/paraphrase-MiniLM-L6-v2")
-qv = model.encode(["incident template"], normalize_embeddings=True).tolist()
-res = c.search(qv, "vec", param={"nprobe":10}, limit=5, output_fields=["doc_id","text"])
-for hits in res:
-    for h in hits:
-        print(h.score, h.entity.get("doc_id"), h.entity.get("text"))
+ALLOW_REMOTE_UPLOAD=true
+ALLOW_REMOTE_SYNC=false
+# ADMIN_TOKEN=change-me
 ```
 
 ---
 
 ## 🔐 Security
 
-* Set **`ADMIN_TOKEN`** in `.env` and send it as **`X-Admin-Token`** for `/api/ingest/*` and `/api/sync`.
-* Control exposure:
+* Require **`X-Admin-Token`** for `/api/ingest/*` and `/api/sync` by setting `ADMIN_TOKEN`.
+* Control exposure with:
 
   * `ALLOW_REMOTE_UPLOAD=true|false` (default **true**)
   * `ALLOW_REMOTE_SYNC=true|false` (default **false**)
-* Put the service behind a reverse proxy (TLS), restrict CORS/origins in production.
+* Deploy behind TLS and restrict origins in production.
 
 ---
 
 ## 🛠️ Troubleshooting
 
-* **422 on `/api/ingest/upload`**
-  Do **not** force `Content-Type` manually; let your client set `multipart/form-data` with a boundary.
+* **422 on `/api/ingest/upload`** — let your client set `multipart/form-data`; don’t override the boundary.
+* **Form parser error** — ensure `python-multipart` is available.
+* **Milvus not reachable** — verify Docker stack; `curl http://127.0.0.1:9091/healthz` should return 200.
+* **Embedding dimension mismatch** — pick a model from `/api/rag/models`; UI shows dims to prevent schema drift.
+* **Throughput concerns** — use the Docling test to identify whether convert/export or chunking dominates.
 
-* **`Form data requires "python-multipart"`**
-  Install: `pip install python-multipart`.
+---
 
-* **Milvus not reachable**
-  Ensure Docker stack is healthy. `curl http://127.0.0.1:9091/healthz` should return **200**. Check `MILVUS_HOST/PORT`.
+## 🧭 Roadmap (selected)
 
-* **Embedding dimension mismatch**
-  Use the model list in the UI; dims are shown and enforced.
-
-* **Slow browser uploads**
-  Prefer S3/IBM COS with the generated config; run ingestion server-side.
+* Multi-tenant collections & quotas
+* Advanced hybrid search (keyword + vector)
+* Pluggable OCR/VLM enrichments on images and scanned PDFs
+* Audit logs export
 
 ---
 
 ## 🤝 Contributing
 
-PRs welcome! Please:
+PRs welcome. Please:
 
-* Keep endpoints simple and documented.
-* Add models to the server’s catalog when needed.
-* Prefer small, focused changes with good DX.
+* Keep endpoints small and well-documented.
+* Add models to the backend catalog responsibly (dims matter).
+* Include tests and targeted logs for new ingestion behaviors.
 
 ---
 
@@ -245,5 +267,5 @@ PRs welcome! Please:
 
 **License:** Apache-2.0 © 2025 Ruslan Magana Vsevolodovna
 Issues & feature requests: [https://github.com/ruslanmv/milvus-admin-ui/issues](https://github.com/ruslanmv/milvus-admin-ui/issues)
-If this saved you time, **please ⭐ star the repo**: [https://github.com/ruslanmv/milvus-admin-ui](https://github.com/ruslanmv/milvus-admin-ui)
+If this project helps you, **please ⭐ star the repo**: [https://github.com/ruslanmv/milvus-admin-ui](https://github.com/ruslanmv/milvus-admin-ui)
 

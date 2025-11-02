@@ -85,6 +85,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 from pymilvus import connections, utility, Collection, FieldSchema, CollectionSchema, DataType
+# Extraction tool (Docling-based), optional dependency
+try:
+    import extraction as extraction_tool  # ui/extraction.py
+    _HAS_EXTRACTION = True
+except Exception:
+    _HAS_EXTRACTION = False
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -424,6 +430,14 @@ def _which_or(path: str, fallback: str) -> str:
     w = which(fallback)
     return w or fallback
 
+def _embed_texts(model, texts, normalize=True, batch=32):
+    return model.encode(
+        texts,
+        batch_size=max(1, batch),
+        normalize_embeddings=normalize,
+        show_progress_bar=False,
+    ).tolist()
+
 # -----------------------------------------------------------------------------
 # FS helpers for uploads
 # -----------------------------------------------------------------------------
@@ -460,6 +474,89 @@ def _save_uploads(dest_root: str, files: List[UploadFile]) -> Tuple[int, int, Li
         saved.append(rel)
         count += 1
     return count, total, saved
+
+def _ingest_with_extraction(
+    job_id: str,
+    collection: str,
+    dest_root: str,
+    model_id: Optional[str],
+    chunk_size: int,
+    overlap: int,
+    normalize: bool,
+    ocr: bool,
+    language_detect: bool,
+    dedupe: bool,
+) -> int:
+    if not _HAS_EXTRACTION:
+        raise RuntimeError("In-process extraction unavailable (ui/extraction.py not importable).")
+
+    # Discover files saved under dest_root
+    paths: List[str] = []
+    for _root, _dirs, files in os.walk(dest_root):
+        for name in files:
+            paths.append(os.path.join(_root, name))
+    if not paths:
+        _append_log(job_id, "No files found under upload dir.")
+        return 0
+
+    _append_log(job_id, f"Extraction: converting {len(paths)} file(s) to Markdown/text…")
+    opts = extraction_tool.IngestOptions(
+        chunk_size=int(chunk_size),
+        overlap=int(overlap),
+        ocr=bool(ocr),
+        language_detect=bool(language_detect),
+        dedupe=bool(dedupe),
+    )
+
+    # Encoder
+    model = _MODEL_CACHE.get(model_id or os.getenv("RAG_MODEL", EMBED_MODEL_CATALOG[0]["id"])) or _load_sentence_model(model_id)
+    bs = _int_env("RAG_BATCH_SIZE", 32)
+
+    coll = Collection(collection)
+    # Optional sanity: check dim
+    try:
+        vec_field = next(f for f in coll.schema.fields if f.dtype == DataType.FLOAT_VECTOR)
+        dim = getattr(vec_field.params, "dim", None) or getattr(vec_field, "dim", None)
+    except Exception:
+        dim = None
+
+    inserted = 0
+    batch_ids: List[str] = []
+    batch_txt: List[str] = []
+
+    for chunk in extraction_tool.iter_convert_paths(paths, opts):
+        batch_ids.append(chunk.stable_id())
+        batch_txt.append(chunk.text)
+        if len(batch_txt) >= bs:
+            vecs = _embed_texts(model, batch_txt, normalize=normalize, batch=bs)
+            if dim and vecs and len(vecs[0]) != int(dim):
+                raise RuntimeError(f"Embedding dim {len(vecs[0])} != collection dim {dim}")
+            coll.insert([batch_ids, batch_txt, vecs])
+            inserted += len(batch_ids)
+            batch_ids.clear()
+            batch_txt.clear()
+            _set_job(job_id, stage="ingesting", progress=min(90, 40 + inserted % 50))
+
+    # flush tail
+    if batch_txt:
+        vecs = _embed_texts(model, batch_txt, normalize=normalize, batch=bs)
+        if dim and vecs and len(vecs[0]) != int(dim):
+            raise RuntimeError(f"Embedding dim {len(vecs[0])} != collection dim {dim}")
+        coll.insert([batch_ids, batch_txt, vecs])
+        inserted += len(batch_ids)
+        batch_ids.clear()
+        batch_txt.clear()
+
+    _set_job(job_id, stage="building_index", progress=95)
+    try:
+        coll.flush()
+    except Exception as e:
+        _append_log(job_id, f"flush warning: {e}")
+    try:
+        coll.load()
+    except Exception as e:
+        _append_log(job_id, f"load warning: {e}")
+    return inserted
 
 # -----------------------------------------------------------------------------
 # Sentence embeddings (RAG demo)
@@ -1068,6 +1165,7 @@ async def api_ingest_upload(
     language_detect: bool = Form(True),
     dedupe: bool = Form(True),
     files: Optional[List[UploadFile]] = File(None),
+    files_brackets: Optional[List[UploadFile]] = File(None, alias="files[]"),
     file: Optional[UploadFile] = File(None),
 ):
     admin_token = os.getenv("ADMIN_TOKEN")
@@ -1086,6 +1184,8 @@ async def api_ingest_upload(
     file_list: List[UploadFile] = []
     if isinstance(files, list) and len(files) > 0:
         file_list.extend(files)
+    if isinstance(files_brackets, list) and len(files_brackets) > 0:
+        file_list.extend(files_brackets)
     if file is not None:
         file_list.append(file)
 
