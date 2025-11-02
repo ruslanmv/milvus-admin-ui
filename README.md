@@ -23,8 +23,7 @@
   Crafted by <a href="#" target="_blank">Ruslan Magana Vsevolodovna</a> · ⭐ <a href="https://github.com/ruslanmv/milvus-admin-ui" target="_blank">Star the repo</a>
 </p>
 
-![](assets/2025-11-02-14-36-46.png)
-
+![](assets/milvus-ui-demo.gif)
 ---
 
 ## ✨ What you get
@@ -252,6 +251,7 @@ ALLOW_REMOTE_SYNC=false
 * Audit logs export
 
 ---
+![](assets/2025-11-02-14-36-46.png)
 
 ## 🤝 Contributing
 
