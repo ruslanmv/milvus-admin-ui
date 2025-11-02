@@ -141,7 +141,7 @@ graph LR
     C --> D[mui-ingest --source-root <job_dir>];
     D --> E[mui-create-vectordb];
     E --> F[Milvus collection + index];
-    C -->|/api/jobs/{id}| G[UI progress + logs];
+    C -->|/api/jobs/{id}| G["UI progress + logs"];
 ```
 
 ---
