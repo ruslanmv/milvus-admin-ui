@@ -135,13 +135,13 @@ The backend exposes a catalog at **`GET /api/rag/models`** and the UI auto-updat
 **Pipeline (Mermaid)**
 
 ```mermaid
-flowchart LR
-  A[Browser files] -- multipart --> B[/api/ingest/upload/]
-  B -->|save to UPLOAD_WORKDIR| C[Background Job]
-  C --> D[mui-ingest --source-root <job_dir>]
-  D --> E[mui-create-vectordb]
-  E --> F[Milvus collection + index]
-  C -->|/api/jobs/{id}| G[UI progress + logs]
+graph LR
+    A[Browser files] -->|multipart| B[/api/ingest/upload/];
+    B -->|save to UPLOAD_WORKDIR| C[Background Job];
+    C --> D[mui-ingest --source-root <job_dir>];
+    D --> E[mui-create-vectordb];
+    E --> F[Milvus collection + index];
+    C -->|/api/jobs/{id}| G[UI progress + logs];
 ```
 
 ---
