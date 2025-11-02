@@ -101,7 +101,8 @@ job_*.log
 
 .env
 .env.*
-!.env.example   # keep a clean example config in repo, if you add one
+!.env.example
+!.env.template
 *.key
 *.crt
 *.pem
